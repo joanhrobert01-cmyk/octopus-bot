@@ -1,7 +1,7 @@
 {
   "name": "octopus-bot-manager",
-  "version": "2.0.0",
-  "description": "Octopus Bot - Multi-tenant Telegram Bot Manager",
+  "version": "4.0.0",
+  "description": "Octopus Bot - Flow-powered Multi-tenant Bot Manager",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
