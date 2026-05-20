@@ -1,5 +1,6 @@
 const { Bot, InlineKeyboard } = require("grammy");
 const { createClient } = require("@supabase/supabase-js");
+const http = require("http");
 
 // ─── CONFIG ───────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -11,17 +12,36 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-// Mapa de bots ativos: botId -> instância do Bot
 const activeBots = new Map();
+
+// ─── SERVIDOR HTTP (obrigatório no Render) ────────────────
+function startHealthServer() {
+  const PORT = process.env.PORT || 3000;
+
+  const server = http.createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        status: "ok",
+        bots_ativos: activeBots.size,
+        uptime: Math.floor(process.uptime()) + "s"
+      }));
+    } else {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("Octopus Bot Manager rodando! Bots ativos: " + activeBots.size);
+    }
+  });
+
+  server.listen(PORT, () => {
+    console.log(`🌐 Servidor HTTP rodando na porta ${PORT}`);
+  });
+}
 
 // ─── HANDLERS DO BOT ──────────────────────────────────────
 function setupBotHandlers(bot, botRecord) {
-  // /start
   bot.command("start", async (ctx) => {
     try {
       await upsertLead(ctx.from, botRecord);
-
       const firstName = ctx.from.first_name || "amigo";
 
       const keyboard = new InlineKeyboard()
@@ -30,134 +50,46 @@ function setupBotHandlers(bot, botRecord) {
         .text("💬 Suporte", `suporte_${botRecord.id}`);
 
       await ctx.reply(
-        `👋 Olá, *${firstName}*! Bem-vindo!\n\n` +
-          `Aqui você encontra nossos planos e ofertas exclusivas.\n\n` +
-          `Escolha uma opção abaixo:`,
-        {
-          parse_mode: "Markdown",
-          reply_markup: keyboard,
-        }
+        `👋 Olá, *${firstName}*! Bem-vindo!\n\nAqui você encontra nossos planos e ofertas exclusivas.\n\nEscolha uma opção abaixo:`,
+        { parse_mode: "Markdown", reply_markup: keyboard }
       );
     } catch (err) {
       console.error(`[Bot ${botRecord.name}] Erro no /start:`, err.message);
     }
   });
 
-  // Ver planos
   bot.callbackQuery(new RegExp(`^planos_${botRecord.id}$`), async (ctx) => {
     await ctx.answerCallbackQuery();
-
-    // Busca planos configurados no fluxo do bot
-    const planos = await getPlanos(botRecord);
-
-    if (planos.length === 0) {
-      await ctx.reply(
-        `📦 *Nossos Planos*\n\n` +
-          `_Nenhum plano configurado ainda._\n\n` +
-          `Configure seus planos no painel do Octopus Bot.`,
-        { parse_mode: "Markdown" }
-      );
-      return;
-    }
-
-    const keyboard = new InlineKeyboard();
-    planos.forEach((plano) => {
-      keyboard
-        .text(
-          `${plano.name} — R$ ${Number(plano.price).toFixed(2)}`,
-          `comprar_${botRecord.id}_${plano.id}`
-        )
-        .row();
-    });
-
-    const texto = planos
-      .map(
-        (p, i) =>
-          `*${i + 1}. ${p.name}*\n💰 R$ ${Number(p.price).toFixed(2)}\n`
-      )
-      .join("\n");
-
-    await ctx.reply(`📦 *Nossos Planos*\n\n${texto}`, {
-      parse_mode: "Markdown",
-      reply_markup: keyboard,
-    });
-  });
-
-  // Suporte
-  bot.callbackQuery(new RegExp(`^suporte_${botRecord.id}$`), async (ctx) => {
-    await ctx.answerCallbackQuery();
     await ctx.reply(
-      `💬 *Suporte*\n\nEntre em contato com nossa equipe para ajuda.`,
+      `📦 *Nossos Planos*\n\n_Configure seus planos no painel do Octopus Bot._`,
       { parse_mode: "Markdown" }
     );
   });
 
-  // Comprar plano
-  bot.callbackQuery(
-    new RegExp(`^comprar_${botRecord.id}_(.+)$`),
-    async (ctx) => {
-      await ctx.answerCallbackQuery();
-      await ctx.reply(
-        `⏳ *Gerando PIX...*\n\n` +
-          `_Integração com pagamentos em breve!_`,
-        { parse_mode: "Markdown" }
-      );
-    }
-  );
+  bot.callbackQuery(new RegExp(`^suporte_${botRecord.id}$`), async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.reply(`💬 *Suporte*\n\nEntre em contato com nossa equipe.`, {
+      parse_mode: "Markdown",
+    });
+  });
 
-  // Erro geral do bot
   bot.catch((err) => {
     console.error(`[Bot ${botRecord.name}] Erro:`, err.message);
   });
 }
 
-// ─── BUSCAR PLANOS DO FLUXO ───────────────────────────────
-async function getPlanos(botRecord) {
-  try {
-    // Busca fluxo vinculado ao bot
-    const { data: flowBot } = await supabase
-      .from("flow_bots")
-      .select("flow_id")
-      .eq("bot_id", botRecord.id)
-      .limit(1)
-      .single();
-
-    if (!flowBot) return [];
-
-    // Busca planos do fluxo
-    const { data: planos } = await supabase
-      .from("flow_plans")
-      .select("*")
-      .eq("flow_id", flowBot.flow_id)
-      .eq("is_active", true);
-
-    return planos || [];
-  } catch {
-    return [];
-  }
-}
-
 // ─── SALVAR LEAD ──────────────────────────────────────────
 async function upsertLead(telegramUser, botRecord) {
   try {
-    // Verifica se lead já existe
     const { data: existing } = await supabase
       .from("customers")
-      .select("id, lead_status")
+      .select("id")
       .eq("telegram_id", String(telegramUser.id))
       .eq("bot_id", botRecord.id)
       .single();
 
-    if (existing) {
-      // Atualiza contador de starts
-      await supabase
-        .from("customers")
-        .update({ updated_at: new Date().toISOString() })
-        .eq("id", existing.id);
-      return existing;
-    }
+    if (existing) return existing;
 
-    // Cria novo lead
     const fullName = [telegramUser.first_name, telegramUser.last_name]
       .filter(Boolean)
       .join(" ");
@@ -176,7 +108,6 @@ async function upsertLead(telegramUser, botRecord) {
       .single();
 
     if (error) throw error;
-
     console.log(`✅ [Bot ${botRecord.name}] Novo lead: ${fullName}`);
     return data;
   } catch (err) {
@@ -187,7 +118,6 @@ async function upsertLead(telegramUser, botRecord) {
 
 // ─── INICIAR UM BOT ───────────────────────────────────────
 async function startBot(botRecord) {
-  // Evita duplicata
   if (activeBots.has(botRecord.id)) {
     console.log(`[Bot ${botRecord.name}] Já está rodando.`);
     return;
@@ -202,16 +132,15 @@ async function startBot(botRecord) {
     const bot = new Bot(botRecord.telegram_token);
     setupBotHandlers(bot, botRecord);
 
-    // Inicia em background (não bloqueia)
     bot.start().catch((err) => {
       console.error(`[Bot ${botRecord.name}] Erro ao iniciar:`, err.message);
       activeBots.delete(botRecord.id);
     });
 
     activeBots.set(botRecord.id, bot);
-    console.log(`🤖 [Bot ${botRecord.name}] Iniciado com sucesso!`);
+    console.log(`🤖 [Bot ${botRecord.name}] Iniciado!`);
   } catch (err) {
-    console.error(`[Bot ${botRecord.name}] Falha ao criar instância:`, err.message);
+    console.error(`[Bot ${botRecord.name}] Falha:`, err.message);
   }
 }
 
@@ -219,7 +148,6 @@ async function startBot(botRecord) {
 async function stopBot(botId, botName) {
   const bot = activeBots.get(botId);
   if (!bot) return;
-
   try {
     await bot.stop();
     activeBots.delete(botId);
@@ -229,7 +157,7 @@ async function stopBot(botId, botName) {
   }
 }
 
-// ─── CARREGAR TODOS OS BOTS ATIVOS ────────────────────────
+// ─── CARREGAR TODOS OS BOTS ───────────────────────────────
 async function loadAllBots() {
   console.log("🔄 Carregando bots ativos do Supabase...");
 
@@ -244,15 +172,13 @@ async function loadAllBots() {
   }
 
   if (!bots || bots.length === 0) {
-    console.log("Nenhum bot ativo encontrado. Aguardando novos cadastros...");
+    console.log("Nenhum bot ativo. Aguardando novos cadastros...");
     return;
   }
 
   console.log(`📋 ${bots.length} bot(s) encontrado(s). Iniciando...`);
-
   for (const botRecord of bots) {
     await startBot(botRecord);
-    // Pequeno delay para não sobrecarregar a API do Telegram
     await new Promise((r) => setTimeout(r, 500));
   }
 }
@@ -270,52 +196,48 @@ function watchForNewBots() {
         const { eventType, new: newRecord, old: oldRecord } = payload;
 
         if (eventType === "INSERT" && newRecord.is_active) {
-          console.log(`🆕 Novo bot cadastrado: ${newRecord.name}`);
+          console.log(`🆕 Novo bot: ${newRecord.name}`);
           await startBot(newRecord);
         }
 
         if (eventType === "UPDATE") {
           if (newRecord.is_active && !oldRecord.is_active) {
-            // Bot foi ativado
-            console.log(`✅ Bot reativado: ${newRecord.name}`);
+            console.log(`✅ Bot ativado: ${newRecord.name}`);
             await startBot(newRecord);
           } else if (!newRecord.is_active && oldRecord.is_active) {
-            // Bot foi desativado
             console.log(`⛔ Bot desativado: ${newRecord.name}`);
             await stopBot(newRecord.id, newRecord.name);
           }
         }
 
         if (eventType === "DELETE") {
-          console.log(`🗑️  Bot removido: ${oldRecord.name}`);
           await stopBot(oldRecord.id, oldRecord.name);
         }
       }
     )
     .subscribe((status) => {
       if (status === "SUBSCRIBED") {
-        console.log("✅ Realtime conectado — detectando novos bots!");
+        console.log("✅ Realtime conectado!");
       }
     });
 }
 
-// ─── INICIALIZAÇÃO ────────────────────────────────────────
+// ─── MAIN ─────────────────────────────────────────────────
 async function main() {
   console.log("🐙 Octopus Bot Manager iniciando...");
-  console.log(`📡 Supabase: ${SUPABASE_URL}`);
 
+  // Inicia servidor HTTP PRIMEIRO (Render precisa ver a porta)
+  startHealthServer();
+
+  // Depois carrega os bots
   await loadAllBots();
   watchForNewBots();
 
-  console.log("✅ Sistema pronto! Bots rodando:", activeBots.size);
+  console.log("✅ Sistema pronto! Bots ativos:", activeBots.size);
 }
 
-// Graceful shutdown
 process.on("SIGTERM", async () => {
-  console.log("Encerrando todos os bots...");
-  for (const [id, bot] of activeBots) {
-    await bot.stop();
-  }
+  for (const [, bot] of activeBots) await bot.stop();
   process.exit(0);
 });
 
