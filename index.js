@@ -53,17 +53,33 @@ function formatDuration(duration) {
 
 // ─── BUSCAR FLUXO DO BOT ──────────────────────────────────
 async function getFlowForBot(botRecord) {
-  const { data, error } = await supabase
+  // Tenta primeiro pelo campo bot_id da tabela
+  const { data: byColumn } = await supabase
     .from("flows")
     .select("*")
     .eq("bot_id", botRecord.id)
-    .eq("status", "active")
-    .order("created_at", { ascending: false })
+    .in("status", ["active", "draft", "published"])
+    .order("updated_at", { ascending: false })
     .limit(1)
     .single();
 
-  if (error || !data) return null;
-  return data;
+  if (byColumn) return byColumn;
+
+  // Fallback: busca nos botIds dentro do config JSON
+  const { data: allFlows } = await supabase
+    .from("flows")
+    .select("*")
+    .eq("user_id", botRecord.user_id)
+    .in("status", ["active", "draft", "published"]);
+
+  if (!allFlows) return null;
+
+  const match = allFlows.find((f) => {
+    const botIds = f.config?.botIds || [];
+    return botIds.includes(botRecord.id);
+  });
+
+  return match || null;
 }
 
 // ─── SALVAR / BUSCAR LEAD ─────────────────────────────────
